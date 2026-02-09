@@ -1,0 +1,42 @@
+[project]
+name = "sdcpy-map"
+version = "0.1.0"
+description = "Spatial SDC map utilities built on top of sdcpy"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9,<3.13"
+authors = [
+  {name = "Alejandro Fontal"}
+]
+dependencies = [
+  "sdcpy>=0.7.0",
+  "numpy>=1.24.3",
+  "pandas>=2.0.2",
+  "xarray>=2023.0.0",
+  "h5netcdf>=1.0.0",
+  "matplotlib>=3.7.1",
+  "geopandas>=0.13.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "ruff>=0.8.0"
+]
+
+[project.scripts]
+sdcpy-map-demo = "sdcpy_map.cli:main"
+
+[project.urls]
+Repository = "https://github.com/AlFontal/sdcpy-map"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sdcpy_map"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
