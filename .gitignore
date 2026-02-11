@@ -11,3 +11,6 @@ dist/
 .output/
 reports/_site/
 reports/.quarto/
+
+.tmp/
+reports/assets/
