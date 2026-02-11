@@ -1,0 +1,27 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.ipynb
+
+website:
+  title: "sdcpy-map"
+  navbar:
+    left:
+      - href: index.ipynb
+        text: "Tutorial"
+
+format:
+  html:
+    number-sections: false
+    highlight-style: github
+    theme:
+      light: litera
+    css: custom.css
+    toc: true
+    toc-title: "CONTENTS"
+    toc-location: right
+    code-tools:
+      source: true
+      toggle: true
+    code-summary: "Show Code"

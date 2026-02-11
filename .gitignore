@@ -9,3 +9,5 @@ __pycache__/
 dist/
 .data/
 .output/
+reports/_site/
+reports/.quarto/
