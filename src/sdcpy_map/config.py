@@ -9,6 +9,7 @@ class SDCMapConfig:
 
     fragment_size: int = 12
     n_permutations: int = 49
+    two_tailed: bool = False
     min_lag: int = -6
     max_lag: int = 6
     alpha: float = 0.05
@@ -22,5 +23,5 @@ class SDCMapConfig:
     lat_max: float = 20
     lon_min: float = -170
     lon_max: float = -70
-    lat_stride: int = 2
-    lon_stride: int = 2
+    lat_stride: int = 1
+    lon_stride: int = 1

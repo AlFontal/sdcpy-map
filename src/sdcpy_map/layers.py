@@ -68,6 +68,7 @@ def _summarize_gridpoint(
             local_vals,
             fragment_size=config.fragment_size,
             n_permutations=config.n_permutations,
+            two_tailed=config.two_tailed,
             min_lag=config.min_lag,
             max_lag=config.max_lag,
         )
@@ -102,21 +103,40 @@ def _summarize_gridpoint(
 
 def compute_sdcmap_layers(
     driver: pd.Series,
-    sst_anom: xr.DataArray,
-    config: SDCMapConfig,
+    mapped_field: xr.DataArray | None = None,
+    config: SDCMapConfig | None = None,
+    *,
+    sst_anom: xr.DataArray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Compute SDCMap-style summary layers for every gridpoint."""
-    index = pd.DatetimeIndex(sst_anom["time"].values)
+    """Compute SDCMap-style summary layers for every gridpoint.
+
+    Parameters
+    ----------
+    mapped_field
+        Gridded mapped variable with dimensions ``(time, lat, lon)``.
+    config
+        SDCMap configuration parameters.
+    sst_anom
+        Backward-compatible alias for ``mapped_field``.
+    """
+    if mapped_field is None:
+        mapped_field = sst_anom
+    if mapped_field is None:
+        raise ValueError("`mapped_field` must be provided.")
+    if config is None:
+        raise ValueError("`config` must be provided.")
+
+    index = pd.DatetimeIndex(mapped_field["time"].values)
     driver = driver.reindex(index)
     if driver.isna().any():
-        raise ValueError("Driver and SST time coverage do not align.")
+        raise ValueError("Driver and mapped-variable time coverage do not align.")
 
     peak_date = pd.Timestamp(config.peak_date)
     peak_idx = int(np.argmin(np.abs(index - peak_date)))
     driver_vals = driver.to_numpy(dtype=float)
 
-    nlat = sst_anom.sizes["lat"]
-    nlon = sst_anom.sizes["lon"]
+    nlat = mapped_field.sizes["lat"]
+    nlon = mapped_field.sizes["lon"]
 
     layers = {
         "corr_mean": np.full((nlat, nlon), np.nan, dtype=float),
@@ -131,7 +151,7 @@ def compute_sdcmap_layers(
 
     for i in range(nlat):
         for j in range(nlon):
-            local_vals = np.asarray(sst_anom[:, i, j].values, dtype=float)
+            local_vals = np.asarray(mapped_field[:, i, j].values, dtype=float)
             summary = _summarize_gridpoint(
                 driver_vals=driver_vals,
                 local_vals=local_vals,
