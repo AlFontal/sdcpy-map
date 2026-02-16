@@ -87,10 +87,30 @@ DEFAULT_DRIVER_DATASET_KEY = "pdo"
 DEFAULT_FIELD_DATASET_KEY = "ncep_air"
 
 
-def download_if_missing(url: str, destination: Path) -> Path:
-    """Download a file only if it does not exist (or is empty)."""
+def download_if_missing(
+    url: str,
+    destination: Path,
+    *,
+    refresh: bool = False,
+    verify_remote: bool = False,
+    offline: bool = False,
+) -> Path:
+    """Download a dataset with cache-first behavior and optional revalidation."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and destination.stat().st_size > 0:
+
+    def _is_non_empty(path: Path) -> bool:
+        return path.exists() and path.stat().st_size > 0
+
+    def _cleanup_zero_byte(path: Path) -> None:
+        if path.exists() and path.stat().st_size == 0:
+            path.unlink()
+
+    local_ready = _is_non_empty(destination)
+    if local_ready and not refresh:
+        # Offline mode never performs remote checks; use local cache directly.
+        if offline or not verify_remote:
+            return destination
+
         try:
             request = Request(url, method="HEAD")
             with urlopen(request, timeout=20) as response:
@@ -99,8 +119,14 @@ def download_if_missing(url: str, destination: Path) -> Path:
         except Exception:
             remote_size = None
 
-        if remote_size is not None and destination.stat().st_size >= remote_size:
+        # Only redownload when the remote size is known and local is clearly stale.
+        if remote_size is None or destination.stat().st_size >= remote_size:
             return destination
+
+    if offline:
+        raise RuntimeError(
+            f"Offline mode is enabled and '{destination}' is unavailable or requires refresh."
+        )
 
     curl_cmd = [
         "curl",
@@ -120,8 +146,11 @@ def download_if_missing(url: str, destination: Path) -> Path:
         for attempt in range(4):
             try:
                 subprocess.run(curl_cmd, check=True)
-                return destination
-            except subprocess.CalledProcessError:
+                if _is_non_empty(destination):
+                    return destination
+                raise RuntimeError(f"Downloaded file is empty: '{destination}'.")
+            except (subprocess.CalledProcessError, RuntimeError):
+                _cleanup_zero_byte(destination)
                 if attempt == 3:
                     raise
     except FileNotFoundError:
@@ -133,10 +162,11 @@ def download_if_missing(url: str, destination: Path) -> Path:
     for idx in range(attempts):
         try:
             urlretrieve(url, destination)
-            return destination
+            if _is_non_empty(destination):
+                return destination
+            raise RuntimeError(f"Downloaded file is empty: '{destination}'.")
         except Exception:
-            if destination.exists():
-                destination.unlink()
+            _cleanup_zero_byte(destination)
             if idx == attempts - 1:
                 raise
 

@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ from sdcpy_map.datasets import (
     DEFAULT_DRIVER_DATASET_KEY,
     DEFAULT_FIELD_DATASET_KEY,
     align_driver_to_field,
+    download_if_missing,
     fetch_public_example_data,
     grid_coordinates,
     load_driver_series,
@@ -100,6 +102,137 @@ def test_align_driver_to_field_success_and_failure():
     bad_driver = driver.iloc[:-1]
     with pytest.raises(ValueError):
         align_driver_to_field(bad_driver, field)
+
+
+def test_existing_non_empty_file_returns_without_network_by_default(tmp_path: Path, monkeypatch):
+    path = tmp_path / "dataset.bin"
+    path.write_bytes(b"cached")
+
+    def fail_urlopen(*args, **kwargs):
+        raise AssertionError("urlopen should not be called for cache hits")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("subprocess.run should not be called for cache hits")
+
+    def fail_urlretrieve(*args, **kwargs):
+        raise AssertionError("urlretrieve should not be called for cache hits")
+
+    monkeypatch.setattr("sdcpy_map.datasets.urlopen", fail_urlopen)
+    monkeypatch.setattr("sdcpy_map.datasets.subprocess.run", fail_run)
+    monkeypatch.setattr("sdcpy_map.datasets.urlretrieve", fail_urlretrieve)
+
+    out = download_if_missing("https://example.invalid/data.bin", path)
+    assert out == path
+    assert path.read_bytes() == b"cached"
+
+
+def test_existing_file_with_verify_remote_true_checks_head(tmp_path: Path, monkeypatch):
+    path = tmp_path / "dataset.bin"
+    path.write_bytes(b"old")
+    state = {"head_calls": 0, "downloads": 0}
+
+    class _FakeHeadResponse:
+        headers = {"Content-Length": "10"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request, timeout=20):
+        state["head_calls"] += 1
+        assert request.get_method() == "HEAD"
+        return _FakeHeadResponse()
+
+    def fake_run(cmd, check):
+        state["downloads"] += 1
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(b"0123456789")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("sdcpy_map.datasets.urlopen", fake_urlopen)
+    monkeypatch.setattr("sdcpy_map.datasets.subprocess.run", fake_run)
+
+    out = download_if_missing("https://example.invalid/data.bin", path, verify_remote=True)
+    assert out == path
+    assert state["head_calls"] == 1
+    assert state["downloads"] == 1
+    assert path.stat().st_size == 10
+
+
+def test_existing_file_with_verify_remote_and_unknown_size_uses_cache(tmp_path: Path, monkeypatch):
+    path = tmp_path / "dataset.bin"
+    path.write_bytes(b"cached")
+    state = {"head_calls": 0}
+
+    class _FakeHeadResponse:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request, timeout=20):
+        state["head_calls"] += 1
+        assert request.get_method() == "HEAD"
+        return _FakeHeadResponse()
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("download should not run when Content-Length is unavailable")
+
+    monkeypatch.setattr("sdcpy_map.datasets.urlopen", fake_urlopen)
+    monkeypatch.setattr("sdcpy_map.datasets.subprocess.run", fail_run)
+
+    out = download_if_missing("https://example.invalid/data.bin", path, verify_remote=True)
+    assert out == path
+    assert state["head_calls"] == 1
+    assert path.read_bytes() == b"cached"
+
+
+def test_missing_file_with_offline_true_raises(tmp_path: Path):
+    path = tmp_path / "missing.bin"
+    with pytest.raises(RuntimeError, match="Offline mode"):
+        download_if_missing("https://example.invalid/data.bin", path, offline=True)
+
+
+def test_refresh_true_forces_download(tmp_path: Path, monkeypatch):
+    path = tmp_path / "dataset.bin"
+    path.write_bytes(b"cached")
+    calls = {"downloads": 0}
+
+    def fake_run(cmd, check):
+        calls["downloads"] += 1
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(b"refreshed")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("sdcpy_map.datasets.subprocess.run", fake_run)
+
+    out = download_if_missing("https://example.invalid/data.bin", path, refresh=True)
+    assert out == path
+    assert calls["downloads"] == 1
+    assert path.read_bytes() == b"refreshed"
+
+
+def test_missing_file_downloads_successfully(tmp_path: Path, monkeypatch):
+    path = tmp_path / "downloaded.bin"
+    calls = {"downloads": 0}
+
+    def fake_run(cmd, check):
+        calls["downloads"] += 1
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(b"content")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("sdcpy_map.datasets.subprocess.run", fake_run)
+
+    out = download_if_missing("https://example.invalid/data.bin", path)
+    assert out == path
+    assert calls["downloads"] == 1
+    assert path.read_bytes() == b"content"
 
 
 def test_fetch_public_example_data_validates_keys(tmp_path: Path):
