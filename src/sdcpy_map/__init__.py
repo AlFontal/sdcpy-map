@@ -20,8 +20,18 @@ from sdcpy_map.datasets import (
     load_field_anomaly_subset,
     load_sst_anomaly_subset,
 )
-from sdcpy_map.layers import compute_sdcmap_layers, save_layers_npz
-from sdcpy_map.plotting import plot_layer_maps_compact
+from sdcpy_map.layers import (
+    compute_sdcmap_event_layers,
+    compute_sdcmap_layers,
+    derive_compact_layers,
+    detect_driver_events,
+    save_layers_npz,
+)
+from sdcpy_map.plotting import (
+    plot_correlation_maps_by_lag,
+    plot_layer_maps_compact,
+    plot_single_layer_map,
+)
 
 __all__ = [
     "SDCMapConfig",
@@ -39,7 +49,12 @@ __all__ = [
     "load_coastline",
     "align_driver_to_field",
     "grid_coordinates",
+    "detect_driver_events",
+    "compute_sdcmap_event_layers",
     "compute_sdcmap_layers",
+    "derive_compact_layers",
     "save_layers_npz",
+    "plot_correlation_maps_by_lag",
     "plot_layer_maps_compact",
+    "plot_single_layer_map",
 ]

@@ -19,8 +19,12 @@ from sdcpy_map.datasets import (
     load_driver_series,
     load_field_anomaly_subset,
 )
-from sdcpy_map.layers import compute_sdcmap_layers, save_layers_npz
-from sdcpy_map.plotting import plot_layer_maps_compact
+from sdcpy_map.layers import compute_sdcmap_event_layers, save_layers_npz
+from sdcpy_map.plotting import (
+    plot_correlation_maps_by_lag,
+    plot_layer_maps_compact,
+    plot_single_layer_map,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -61,25 +65,70 @@ def main() -> None:
     mapped_field = load_field_anomaly_subset(paths["field"], config=config, field_key=args.field_dataset)
     driver = align_driver_to_field(driver, mapped_field)
 
-    layers = compute_sdcmap_layers(driver=driver, mapped_field=mapped_field, config=config)
+    event_layers = compute_sdcmap_event_layers(driver=driver, mapped_field=mapped_field, config=config)
 
     lats, lons = grid_coordinates(mapped_field)
 
-    npz_path = save_layers_npz(args.out_dir / "sdcmap_layers.npz", layers=layers, lats=lats, lons=lons)
+    npz_path = save_layers_npz(args.out_dir / "sdcmap_layers.npz", layers=event_layers, lats=lats, lons=lons)
 
     coastline = load_coastline(paths["coastline"])
-    png_path = plot_layer_maps_compact(
-        layers=layers,
+    positive_png_path = plot_correlation_maps_by_lag(
+        lag_maps=event_layers["positive"]["lag_maps"],
         lats=lats,
         lons=lons,
         coastline=coastline,
-        out_path=args.out_dir / "sdcmap_layers.png",
+        out_path=args.out_dir / "sdcmap_layers_positive.png",
+        title="SDCMap positive-event lagged correlation maps",
     )
+    negative_png_path = plot_correlation_maps_by_lag(
+        lag_maps=event_layers["negative"]["lag_maps"],
+        lats=lats,
+        lons=lons,
+        coastline=coastline,
+        out_path=args.out_dir / "sdcmap_layers_negative.png",
+        title="SDCMap negative-event lagged correlation maps",
+    )
+    positive_compact_png_path = plot_layer_maps_compact(
+        layers=event_layers["positive"]["layers"],
+        lats=lats,
+        lons=lons,
+        coastline=coastline,
+        out_path=args.out_dir / "sdcmap_layers_positive_compact.png",
+        title="Positive events · A/B/C/D",
+    )
+    negative_compact_png_path = plot_layer_maps_compact(
+        layers=event_layers["negative"]["layers"],
+        lats=lats,
+        lons=lons,
+        coastline=coastline,
+        out_path=args.out_dir / "sdcmap_layers_negative_compact.png",
+        title="Negative events · A/B/C/D",
+    )
+    static_layer_keys = ("corr_mean", "driver_rel_time_mean", "lag_mean", "timing_combo")
+    static_outputs = []
+    for sign_key in ("positive", "negative"):
+        for layer_key in static_layer_keys:
+            static_outputs.append(
+                plot_single_layer_map(
+                    layers=event_layers[sign_key]["layers"],
+                    layer_key=layer_key,
+                    lats=lats,
+                    lons=lons,
+                    coastline=coastline,
+                    out_path=args.out_dir / f"sdcmap_{sign_key}_{layer_key}.png",
+                    title=f"{sign_key.title()} · {layer_key.replace('_mean', '').replace('_', ' ')}",
+                )
+            )
 
     print(f"Driver dataset: {args.driver_dataset}")
     print(f"Field dataset: {args.field_dataset}")
     print(f"Saved: {npz_path}")
-    print(f"Saved: {png_path}")
+    print(f"Saved: {positive_png_path}")
+    print(f"Saved: {negative_png_path}")
+    print(f"Saved: {positive_compact_png_path}")
+    print(f"Saved: {negative_compact_png_path}")
+    for path in static_outputs:
+        print(f"Saved: {path}")
 
 
 if __name__ == "__main__":
