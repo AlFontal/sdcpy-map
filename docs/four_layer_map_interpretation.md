@@ -1,34 +1,30 @@
-# Interpreting the 4 SDCMap Output Layers
+# Interpreting the 4 Compact SDCMap Layers
 
-This note explains the four variables shown in the compact `2x2` map figure produced by `plot_layer_maps_compact`:
+This note explains the four variables shown in the compact `2x2` compatibility figure produced by `plot_layer_maps_compact`.
+
+The canonical SDC-map figure is now the lag-resolved correlation panel set produced by `plot_correlation_maps_by_lag`. This note only documents the legacy compact summary that is still emitted for transition/debugging purposes.
 
 - `corr_mean`
-- `lag_mean`
 - `driver_rel_time_mean`
-- `dominant_sign`
+- `lag_mean`
+- `timing_combo`
 
-All four are computed **per grid cell** from SDC pairs returned by `compute_sdc(...)` in `src/sdcpy_map/layers.py`.
+These compact layers are now derived from the event-conditioned workflow in `src/sdcpy_map/layers.py`.
 
 ## 1) How each grid-cell summary is built
 
-For each `(lat, lon)` cell:
+For each `(lat, lon)` cell and for each selected driver event:
 
-1. Compute all SDC fragment-pairs between:
-   - `ts1`: driver series (for example Niño3.4)
-   - `ts2`: local mapped-variable anomaly series
-2. Keep only finite and significant pairs (`p_value <= alpha`).
-   - In the current package defaults, significance comes from a **one-tailed** permutation test (`SDCMapConfig.two_tailed=False`).
-3. Split pairs by sign:
-   - positive: `r > 0`
-   - negative: `r < 0`
-4. Keep only the top fraction in each sign:
-   - `cpos = floor(len(pos) * top_fraction)`
-   - `cneg = floor(len(neg) * top_fraction)`
-   - a sign is only considered if at least 2 selected pairs exist.
-5. If both signs are available, choose the sign whose selected set has larger `abs(mean(r))`.
-6. Compute layer values from the selected set.
+1. Build a centered driver window of width `correlation_width` around the event peak.
+2. For each lag in `[min_lag, max_lag]`, extract the equally sized field window implied by `lag = start_1 - start_2`.
+3. Compute the local correlation for that event/lag pair.
+4. Estimate significance with the configured permutation test.
+5. Keep the strongest significant lag for that event at that grid cell.
+6. Average those event-level summaries across the selected events of the class.
 
-If no valid selected set exists, the cell is `NaN`.
+So the compact view is not built from full-series SDC fragments anymore. It is built from the best significant event-local lag per selected peak, then averaged across peaks.
+
+If no selected event yields a significant local correlation at a cell, that cell is `NaN`.
 
 ## 2) Meaning of each of the 4 plotted layers
 
@@ -36,87 +32,87 @@ If no valid selected set exists, the cell is `NaN`.
 
 Definition:
 
-`corr_mean = mean(r_selected)`
+`corr_mean = mean(r_best_event)`
+
+where `r_best_event` is the strongest significant lagged correlation retained for each selected event at that cell.
 
 Interpretation:
 
-- Measures average strength of the selected dominant extreme relation.
-- Close to `+1`: strong positive co-variability.
-- Close to `-1`: strong negative co-variability.
-- Near `0`: weak relation (or mixed weak residual relation after filtering).
+- Close to `+1`: the field tends to co-vary positively with the selected event windows.
+- Close to `-1`: the field tends to vary oppositely during those event windows.
+- Near `0`: weak or inconsistent event-conditioned relation.
 
 Plot defaults:
 
 - Colormap: `RdBu_r`
 - Fixed range: `[-1, 1]`
 
-## `lag_mean` (panel: “Mean lag (months)”)
+## `driver_rel_time_mean` (panel: “B. Peak-relative position”)
 
 Definition:
 
-`lag_mean = mean(lag_selected)`, where `lag = start_1 - start_2`
-
-With `start_1` = driver fragment start index, `start_2` = local fragment start index:
-
-- `lag < 0`: driver window starts earlier than local window (driver leads).
-- `lag > 0`: driver window starts later than local window (local leads).
-- `lag ≈ 0`: near-synchronous timing.
-
-In the tutorial notebook, the unit is months because the data are monthly.
-
-Plot defaults:
-
-- Colormap: `coolwarm`
-- Auto-scaled to data range
-
-## `driver_rel_time_mean` (panel: “Mean driver-relative time (months)”)
-
-Definition:
-
-`driver_rel_start = start_1 - peak_idx`
-
-`driver_rel_time_mean = mean(driver_rel_start_selected)`
+`driver_rel_time_mean = mean(center_best_event - peak_idx)`
 
 Interpretation:
 
-- Tells when the selected strong relationship windows occur relative to the reference driver peak month.
-- Negative values: relationship tends to occur **before** the peak.
-- Positive values: relationship tends to occur **after** the peak.
-- Around `0`: concentrated around the peak.
+- This is the position of the retained driver-fragment center relative to the selected event peak.
+- Negative values mean the retained driver fragment is centered before the peak.
+- Positive values mean it is centered after the peak.
+- Values are expressed in native data steps. For monthly inputs, these are months.
 
 Plot defaults:
 
 - Colormap: `PuOr`
 - Auto-scaled to data range
 
-## `dominant_sign` (panel: “Dominant sign (+1/-1)”)
+## `lag_mean` (panel: “C. Lag”)
 
 Definition:
 
-- `+1` if selected dominant set is positive-correlation extreme set.
-- `-1` if selected dominant set is negative-correlation extreme set.
+`lag_mean = mean(lag_best_event)`, where `lag = start_1 - start_2`
 
 Interpretation:
 
-- Encodes polarity only, not magnitude.
-- Useful as a quick phase/polarity map.
+- `lag < 0`: the driver fragment is earlier than the field fragment (driver leads).
+- `lag > 0`: the driver fragment is later than the field fragment (field leads).
+- `lag ≈ 0`: near-synchronous timing.
+- Values are expressed in native data steps. For monthly inputs, these are months.
 
 Plot defaults:
 
-- Colormap: custom two-color map (`blue` for `-1`, `red` for `+1`)
-- Fixed range: `[-1, 1]`
+- Colormap: `coolwarm`
+- Auto-scaled to data range
+
+## `timing_combo` (panel: “D. Combined timing”)
+
+Definition:
+
+`timing_combo = driver_rel_time_mean - lag_mean`
+
+Interpretation:
+
+- This is the exact response timing used in the original slides: the retained field-fragment center with respect to the driver peak.
+- It summarizes the total temporal placement of the retained response in one map.
+- Values are expressed in native data steps. For monthly inputs, these are months.
+
+Plot defaults:
+
+- Colormap: `BrBG`
+- Auto-scaled to data range
 
 ## 3) How to read the 4 panels together
 
-- Use `corr_mean` first to find where the relationship is strongest.
-- Use `dominant_sign` to identify whether that relationship is in-phase (`+`) or anti-phase (`-`).
-- Use `lag_mean` to infer lead/lag direction.
-- Use `driver_rel_time_mean` to place the relationship in event-relative time (pre-peak vs post-peak).
+- Use `corr_mean` first to find where the selected events have the strongest average response.
+- Use `driver_rel_time_mean` to see where the retained response sits relative to the driver peak.
+- Use `lag_mean` to infer whether the field tends to lead or lag the selected event windows.
+- Use `timing_combo` to recover the exact combined timing described in the methodology slides.
 
-Combined, they answer: **where**, **how strong**, **with what sign**, and **when** the strongest local driver coupling tends to appear.
+Combined, they answer: **where**, **how strong**, **where relative to the peak**, **with what lag**, and **with what exact combined timing** the selected event classes are expressed.
 
 ## 4) Important caveats
 
-- Results depend on `fragment_size`, lag bounds, `alpha`, and `top_fraction`.
-- `lag_mean` sign convention follows `lag = start_1 - start_2` in `sdcpy`.
-- Auto-scaled colorbars for `lag_mean` and `driver_rel_time_mean` can change from run to run; compare ranges before comparing maps across experiments.
+- Results depend on `correlation_width`, lag bounds, `alpha`, and the selected `N+` / `N-`.
+- `lag_mean` sign convention follows `lag = start_1 - start_2`.
+- `driver_rel_time_mean` is derived from the best-scoring fragment center inside the local event neighborhood, not from the full record.
+- `timing_combo` is derived from `driver_rel_time_mean - lag_mean`, so interpret it jointly with those two maps.
+- Auto-scaled colorbars for `driver_rel_time_mean`, `lag_mean`, and `timing_combo` can change from run to run; compare ranges before comparing maps across experiments.

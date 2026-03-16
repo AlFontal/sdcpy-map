@@ -47,11 +47,38 @@ def test_main_wires_selected_datasets(monkeypatch, tmp_path: Path, capsys):
         return driver
 
     def fake_compute(*, driver, mapped_field, config):
-        return {
+        layers = {
             "corr_mean": np.zeros((2, 2), dtype=float),
             "lag_mean": np.zeros((2, 2), dtype=float),
             "driver_rel_time_mean": np.zeros((2, 2), dtype=float),
+            "timing_combo": np.zeros((2, 2), dtype=float),
+            "strong_span": np.zeros((2, 2), dtype=float),
+            "strong_start": np.zeros((2, 2), dtype=float),
             "dominant_sign": np.ones((2, 2), dtype=float),
+            "n_selected": np.ones((2, 2), dtype=float),
+        }
+        return {
+            "positive": {
+                "layers": layers,
+                "lag_maps": {
+                    "lags": [0],
+                    "corr_by_lag": np.zeros((1, 2, 2), dtype=float),
+                    "event_count_by_lag": np.ones((1, 2, 2), dtype=float),
+                },
+                "summary": {},
+                "events": [],
+            },
+            "negative": {
+                "layers": layers,
+                "lag_maps": {
+                    "lags": [0],
+                    "corr_by_lag": np.zeros((1, 2, 2), dtype=float),
+                    "event_count_by_lag": np.ones((1, 2, 2), dtype=float),
+                },
+                "summary": {},
+                "events": [],
+            },
+            "event_catalog": {},
         }
 
     def fake_grid(mapped):
@@ -65,20 +92,32 @@ def test_main_wires_selected_datasets(monkeypatch, tmp_path: Path, capsys):
     def fake_load_coast(path):
         return None
 
-    def fake_plot(*, layers, lats, lons, coastline, out_path, title=""):
+    def fake_plot(*, lag_maps, lats, lons, coastline, out_path, title=""):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("png", encoding="utf-8")
+        return out_path
+
+    def fake_compact_plot(*, layers, lats, lons, coastline, out_path, title=""):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("png", encoding="utf-8")
+        return out_path
+
+    def fake_single_plot(*, layers, layer_key, lats, lons, coastline, out_path, title=None):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(layer_key, encoding="utf-8")
         return out_path
 
     monkeypatch.setattr(cli, "fetch_public_example_data", fake_fetch_public_example_data)
     monkeypatch.setattr(cli, "load_driver_series", fake_load_driver_series)
     monkeypatch.setattr(cli, "load_field_anomaly_subset", fake_load_field_anomaly_subset)
     monkeypatch.setattr(cli, "align_driver_to_field", fake_align)
-    monkeypatch.setattr(cli, "compute_sdcmap_layers", fake_compute)
+    monkeypatch.setattr(cli, "compute_sdcmap_event_layers", fake_compute)
     monkeypatch.setattr(cli, "grid_coordinates", fake_grid)
     monkeypatch.setattr(cli, "save_layers_npz", fake_save)
     monkeypatch.setattr(cli, "load_coastline", fake_load_coast)
-    monkeypatch.setattr(cli, "plot_layer_maps_compact", fake_plot)
+    monkeypatch.setattr(cli, "plot_correlation_maps_by_lag", fake_plot)
+    monkeypatch.setattr(cli, "plot_layer_maps_compact", fake_compact_plot)
+    monkeypatch.setattr(cli, "plot_single_layer_map", fake_single_plot)
 
     cli.main()
     out = capsys.readouterr().out
