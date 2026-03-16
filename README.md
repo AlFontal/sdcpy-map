@@ -1,5 +1,9 @@
 # sdcpy-map
 
+[![CI](https://github.com/AlFontal/sdcpy-map/actions/workflows/ci.yml/badge.svg)](https://github.com/AlFontal/sdcpy-map/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.9%20to%203.12-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 `sdcpy-map` computes event-conditioned spatial Scale-Dependent Correlation (SDC) maps from a scalar driver time series and a gridded field.
 
 Typical use case:
