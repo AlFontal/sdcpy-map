@@ -104,6 +104,50 @@ def test_align_driver_to_field_success_and_failure():
         align_driver_to_field(bad_driver, field)
 
 
+def test_align_driver_to_field_normalizes_monthly_start_end_mismatch():
+    driver_idx = pd.date_range("2000-01-31", periods=6, freq="ME")
+    field_idx = pd.date_range("2000-01-01", periods=6, freq="MS")
+    driver = pd.Series(np.arange(6, dtype=float), index=driver_idx)
+    field = xr.DataArray(
+        np.zeros((6, 2, 2), dtype=float),
+        dims=("time", "lat", "lon"),
+        coords={"time": field_idx, "lat": [0, 1], "lon": [10, 20]},
+    )
+
+    aligned = align_driver_to_field(driver, field)
+    assert aligned.index.equals(field_idx)
+    assert np.allclose(aligned.to_numpy(), driver.to_numpy())
+
+
+def test_align_driver_to_field_normalizes_yearly_start_end_mismatch():
+    driver_idx = pd.date_range("2000-12-31", periods=4, freq="YE")
+    field_idx = pd.date_range("2000-01-01", periods=4, freq="YS")
+    driver = pd.Series(np.arange(4, dtype=float), index=driver_idx)
+    field = xr.DataArray(
+        np.zeros((4, 2, 2), dtype=float),
+        dims=("time", "lat", "lon"),
+        coords={"time": field_idx, "lat": [0, 1], "lon": [10, 20]},
+    )
+
+    aligned = align_driver_to_field(driver, field)
+    assert aligned.index.equals(field_idx)
+    assert np.allclose(aligned.to_numpy(), driver.to_numpy())
+
+
+def test_align_driver_to_field_reports_weekly_anchor_mismatch():
+    driver_idx = pd.date_range("2000-01-02", periods=5, freq="W-SUN")
+    field_idx = pd.date_range("2000-01-03", periods=5, freq="W-MON")
+    driver = pd.Series(np.arange(5, dtype=float), index=driver_idx)
+    field = xr.DataArray(
+        np.zeros((5, 2, 2), dtype=float),
+        dims=("time", "lat", "lon"),
+        coords={"time": field_idx, "lat": [0, 1], "lon": [10, 20]},
+    )
+
+    with pytest.raises(ValueError, match="weekly series, but they use different anchors"):
+        align_driver_to_field(driver, field)
+
+
 def test_existing_non_empty_file_returns_without_network_by_default(tmp_path: Path, monkeypatch):
     path = tmp_path / "dataset.bin"
     path.write_bytes(b"cached")

@@ -314,13 +314,81 @@ def load_coastline(coastline_zip: Path | str) -> gpd.GeoDataFrame:
     return gpd.read_file(coastline_zip)
 
 
+def _sample_timestamps(idx: pd.DatetimeIndex, limit: int = 3) -> str:
+    return ", ".join(ts.date().isoformat() for ts in idx[:limit])
+
+
+def _infer_regular_cadence(idx: pd.DatetimeIndex) -> tuple[str, str] | None:
+    idx = pd.DatetimeIndex(idx).sort_values()
+    if len(idx) < 3:
+        return None
+    inferred = pd.infer_freq(idx)
+    if inferred is None:
+        return None
+    freq = str(inferred).upper()
+    if freq in {"M", "ME", "MS"} or freq.startswith(("M-", "ME-", "MS-")):
+        return ("monthly", freq)
+    if freq in {"A", "AS", "Y", "YS", "YE"} or freq.startswith(("A-", "AS-", "Y-", "YS-", "YE-")):
+        return ("yearly", freq)
+    if freq.startswith("W-"):
+        return ("weekly", freq)
+    return None
+
+
+def _align_driver_to_field_periods(
+    driver: pd.Series,
+    field_index: pd.DatetimeIndex,
+    *,
+    freq: str,
+) -> pd.Series | None:
+    driver_period_index = driver.index.to_period(freq)
+    field_period_index = field_index.to_period(freq)
+    if driver_period_index.has_duplicates or field_period_index.has_duplicates:
+        return None
+    aligned = pd.Series(driver.to_numpy(dtype=float), index=driver_period_index).reindex(field_period_index)
+    if aligned.isna().any():
+        return None
+    aligned.index = field_index
+    return aligned
+
+
 def align_driver_to_field(driver: pd.Series, mapped_field: xr.DataArray) -> pd.Series:
     """Align a driver time series to mapped-field timestamps."""
     idx = pd.DatetimeIndex(mapped_field.time.values)
     aligned = driver.reindex(idx)
-    if aligned.isna().any():
-        raise ValueError("Driver and mapped-variable time indexes do not align.")
-    return aligned
+    if not aligned.isna().any():
+        return aligned
+
+    driver_index = pd.DatetimeIndex(driver.index).sort_values()
+    field_index = idx.sort_values()
+    driver_cadence = _infer_regular_cadence(driver_index)
+    field_cadence = _infer_regular_cadence(field_index)
+
+    if driver_cadence and field_cadence and driver_cadence[0] == field_cadence[0]:
+        cadence = driver_cadence[0]
+        if cadence == "monthly":
+            normalized = _align_driver_to_field_periods(driver, idx, freq="M")
+            if normalized is not None:
+                return normalized
+        elif cadence == "yearly":
+            normalized = _align_driver_to_field_periods(driver, idx, freq="Y")
+            if normalized is not None:
+                return normalized
+        elif cadence == "weekly" and driver_cadence[1] != field_cadence[1]:
+            raise ValueError(
+                "Driver and mapped-variable time indexes do not align exactly. "
+                f"Both appear to be weekly series, but they use different anchors "
+                f"({driver_cadence[1]} vs {field_cadence[1]}). Weekly data is not auto-normalized; "
+                "please convert both inputs to the same weekly convention and try again. "
+                f"Driver sample: {_sample_timestamps(driver_index)}. "
+                f"Field sample: {_sample_timestamps(field_index)}."
+            )
+
+    raise ValueError(
+        "Driver and mapped-variable time indexes do not align. "
+        f"Driver sample: {_sample_timestamps(driver_index)}. "
+        f"Field sample: {_sample_timestamps(field_index)}."
+    )
 
 
 def grid_coordinates(mapped_field: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
