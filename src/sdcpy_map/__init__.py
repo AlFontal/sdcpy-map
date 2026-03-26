@@ -25,6 +25,7 @@ from sdcpy_map.layers import (
     compute_sdcmap_layers,
     derive_compact_layers,
     detect_driver_events,
+    resolve_driver_event_catalog,
     save_layers_npz,
 )
 from sdcpy_map.plotting import (
@@ -50,6 +51,7 @@ __all__ = [
     "align_driver_to_field",
     "grid_coordinates",
     "detect_driver_events",
+    "resolve_driver_event_catalog",
     "compute_sdcmap_event_layers",
     "compute_sdcmap_layers",
     "derive_compact_layers",

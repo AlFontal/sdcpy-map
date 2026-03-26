@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable
 
@@ -34,12 +35,16 @@ def _empty_layers(nlat: int, nlon: int) -> dict[str, np.ndarray]:
 
 
 def _serialize_event(event: dict[str, object]) -> dict[str, object]:
-    return {
+    payload = {
         "index": int(event["index"]),
         "date": str(event["date"]),
         "value": float(event["value"]),
         "sign": str(event["sign"]),
     }
+    source = str(event.get("source") or "").strip().lower()
+    if source:
+        payload["source"] = source
+    return payload
 
 
 def _iter_driver_extrema(driver: pd.Series) -> list[dict[str, object]]:
@@ -121,47 +126,18 @@ def _select_event_subset(
     return selected, ignored
 
 
-def detect_driver_events(driver: pd.Series, config: SDCMapConfig) -> dict[str, object]:
-    """Detect positive and negative driver events plus a base-state mask."""
-    clean_driver = driver.dropna().sort_index()
-    raw_extrema = _iter_driver_extrema(clean_driver)
-    full_len = len(clean_driver)
-    extrema = [
-        item
-        for item in raw_extrema
-        if _event_window_bounds(int(item["index"]), int(config.correlation_width), full_len) is not None
-    ]
-    positive_candidates = [item for item in extrema if item["sign"] == "positive"]
-    negative_candidates = [item for item in extrema if item["sign"] == "negative"]
-
-    min_separation = max(1, int(config.correlation_width))
-    selected_positive, ignored_positive = _select_event_subset(
-        positive_candidates,
-        requested_count=int(config.n_positive_peaks),
-        min_separation=min_separation,
-    )
-    selected_negative, ignored_negative = _select_event_subset(
-        negative_candidates,
-        requested_count=int(config.n_negative_peaks),
-        min_separation=min_separation,
-    )
-
+def _build_event_catalog(
+    *,
+    driver: pd.Series,
+    config: SDCMapConfig,
+    selected_positive: list[dict[str, object]],
+    selected_negative: list[dict[str, object]],
+    ignored_positive: list[dict[str, object]],
+    ignored_negative: list[dict[str, object]],
+    warnings_out: list[str],
+    selection_mode: str,
+) -> dict[str, object]:
     selected_all = selected_positive + selected_negative
-    warnings_out: list[str] = []
-    dropped_for_window = len(raw_extrema) - len(extrema)
-    if dropped_for_window:
-        warnings_out.append(
-            f"Skipped {dropped_for_window} extrema that could not support a full event window of width {int(config.correlation_width)}."
-        )
-    if len(selected_positive) < int(config.n_positive_peaks):
-        warnings_out.append(
-            f"Requested {int(config.n_positive_peaks)} positive events, but found {len(selected_positive)} usable extrema."
-        )
-    if len(selected_negative) < int(config.n_negative_peaks):
-        warnings_out.append(
-            f"Requested {int(config.n_negative_peaks)} negative events, but found {len(selected_negative)} usable extrema."
-        )
-
     threshold: float | None = None
     if selected_all:
         threshold = float(
@@ -202,7 +178,198 @@ def detect_driver_events(driver: pd.Series, config: SDCMapConfig) -> dict[str, o
         "selected_positive_indices": [int(item["index"]) for item in selected_positive],
         "selected_negative_indices": [int(item["index"]) for item in selected_negative],
         "warnings": warnings_out,
+        "selection_mode": str(selection_mode),
     }
+
+
+def _normalize_event_date_key(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        stamp = pd.Timestamp(text)
+    except Exception:
+        return None
+    if pd.isna(stamp):
+        return None
+    return stamp.normalize().date().isoformat()
+
+
+def resolve_driver_event_catalog(
+    driver: pd.Series,
+    config: SDCMapConfig,
+    manual_event_selection: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Resolve the effective event catalog from auto-detection plus optional manual overrides."""
+    auto_catalog = detect_driver_events(driver, config)
+    if manual_event_selection is None:
+        return auto_catalog
+
+    clean_driver = driver.dropna().sort_index()
+    index = pd.DatetimeIndex(clean_driver.index)
+    date_to_index = {stamp.normalize().date().isoformat(): idx for idx, stamp in enumerate(index)}
+    values = clean_driver.to_numpy(dtype=float)
+    full_len = len(clean_driver)
+    auto_selected_positive = {int(item["index"]) for item in auto_catalog["selected_positive"]}
+    auto_selected_negative = {int(item["index"]) for item in auto_catalog["selected_negative"]}
+    auto_candidates = {
+        int(item["index"]): dict(item)
+        for item in (
+            list(auto_catalog["selected_positive"])
+            + list(auto_catalog["selected_negative"])
+            + list(auto_catalog["ignored_positive"])
+            + list(auto_catalog["ignored_negative"])
+        )
+    }
+    warnings_out = [str(item) for item in auto_catalog.get("warnings") or []]
+    selected_positive: list[dict[str, object]] = []
+    selected_negative: list[dict[str, object]] = []
+    selected_indices: set[int] = set()
+
+    for requested_key in ("selected_positive_dates", "selected_negative_dates"):
+        requested_dates = manual_event_selection.get(requested_key) if manual_event_selection else None
+        if not isinstance(requested_dates, list):
+            continue
+        for raw_value in requested_dates:
+            normalized_date = _normalize_event_date_key(raw_value)
+            if normalized_date is None:
+                warnings_out.append(f"Ignored manual event '{raw_value}' because it is not a valid timestamp.")
+                continue
+            event_idx = date_to_index.get(normalized_date)
+            if event_idx is None:
+                warnings_out.append(
+                    f"Ignored manual event '{normalized_date}' because it is outside the aligned driver time axis."
+                )
+                continue
+            if event_idx in selected_indices:
+                continue
+            event_value = float(values[event_idx])
+            if not np.isfinite(event_value):
+                warnings_out.append(
+                    f"Ignored manual event '{normalized_date}' because the driver value is not finite."
+                )
+                continue
+            if event_value == 0.0:
+                warnings_out.append(
+                    f"Ignored manual event '{normalized_date}' because the driver value is exactly zero."
+                )
+                continue
+            if _event_window_bounds(event_idx, int(config.correlation_width), full_len) is None:
+                warnings_out.append(
+                    f"Ignored manual event '{normalized_date}' because it cannot support a full event window of width {int(config.correlation_width)}."
+                )
+                continue
+            if any(abs(existing_idx - event_idx) < int(config.correlation_width) for existing_idx in selected_indices):
+                warnings_out.append(
+                    f"Ignored manual event '{normalized_date}' because it overlaps another selected event window."
+                )
+                continue
+
+            sign = "positive" if event_value > 0 else "negative"
+            source = "auto" if (
+                (sign == "positive" and event_idx in auto_selected_positive)
+                or (sign == "negative" and event_idx in auto_selected_negative)
+            ) else "manual"
+            event = {
+                "index": event_idx,
+                "date": normalized_date,
+                "value": event_value,
+                "sign": sign,
+                "source": source,
+            }
+            if sign == "positive":
+                selected_positive.append(event)
+            else:
+                selected_negative.append(event)
+            selected_indices.add(event_idx)
+
+    selected_positive.sort(key=lambda item: int(item["index"]))
+    selected_negative.sort(key=lambda item: int(item["index"]))
+    ignored_positive = sorted(
+        [
+            {**dict(item), "source": "auto"}
+            for idx, item in auto_candidates.items()
+            if idx not in selected_indices and str(item["sign"]) == "positive"
+        ],
+        key=lambda item: abs(float(item["value"])),
+        reverse=True,
+    )
+    ignored_negative = sorted(
+        [
+            {**dict(item), "source": "auto"}
+            for idx, item in auto_candidates.items()
+            if idx not in selected_indices and str(item["sign"]) == "negative"
+        ],
+        key=lambda item: abs(float(item["value"])),
+        reverse=True,
+    )
+    return _build_event_catalog(
+        driver=clean_driver,
+        config=config,
+        selected_positive=selected_positive,
+        selected_negative=selected_negative,
+        ignored_positive=ignored_positive,
+        ignored_negative=ignored_negative,
+        warnings_out=warnings_out,
+        selection_mode="manual",
+    )
+
+
+def detect_driver_events(driver: pd.Series, config: SDCMapConfig) -> dict[str, object]:
+    """Detect positive and negative driver events plus a base-state mask."""
+    clean_driver = driver.dropna().sort_index()
+    raw_extrema = _iter_driver_extrema(clean_driver)
+    full_len = len(clean_driver)
+    extrema = [
+        item
+        for item in raw_extrema
+        if _event_window_bounds(int(item["index"]), int(config.correlation_width), full_len) is not None
+    ]
+    positive_candidates = [item for item in extrema if item["sign"] == "positive"]
+    negative_candidates = [item for item in extrema if item["sign"] == "negative"]
+
+    min_separation = max(1, int(config.correlation_width))
+    selected_positive, ignored_positive = _select_event_subset(
+        positive_candidates,
+        requested_count=int(config.n_positive_peaks),
+        min_separation=min_separation,
+    )
+    selected_negative, ignored_negative = _select_event_subset(
+        negative_candidates,
+        requested_count=int(config.n_negative_peaks),
+        min_separation=min_separation,
+    )
+
+    warnings_out: list[str] = []
+    dropped_for_window = len(raw_extrema) - len(extrema)
+    if dropped_for_window:
+        warnings_out.append(
+            f"Skipped {dropped_for_window} extrema that could not support a full event window of width {int(config.correlation_width)}."
+        )
+    if len(selected_positive) < int(config.n_positive_peaks):
+        warnings_out.append(
+            f"Requested {int(config.n_positive_peaks)} positive events, but found {len(selected_positive)} usable extrema."
+        )
+    if len(selected_negative) < int(config.n_negative_peaks):
+        warnings_out.append(
+            f"Requested {int(config.n_negative_peaks)} negative events, but found {len(selected_negative)} usable extrema."
+        )
+    selected_positive = [{**dict(item), "source": "auto"} for item in selected_positive]
+    selected_negative = [{**dict(item), "source": "auto"} for item in selected_negative]
+    ignored_positive = [{**dict(item), "source": "auto"} for item in ignored_positive]
+    ignored_negative = [{**dict(item), "source": "auto"} for item in ignored_negative]
+    return _build_event_catalog(
+        driver=clean_driver,
+        config=config,
+        selected_positive=selected_positive,
+        selected_negative=selected_negative,
+        ignored_positive=ignored_positive,
+        ignored_negative=ignored_negative,
+        warnings_out=warnings_out,
+        selection_mode="auto",
+    )
 
 
 def _center_rows(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -531,6 +698,8 @@ def compute_sdcmap_event_layers(
     config: SDCMapConfig | None = None,
     *,
     sst_anom: xr.DataArray | None = None,
+    event_catalog: dict[str, object] | None = None,
+    manual_event_selection: Mapping[str, object] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
     """Compute event-conditioned SDCMap layers for positive and negative driver classes."""
@@ -546,7 +715,14 @@ def compute_sdcmap_event_layers(
     if driver.isna().any():
         raise ValueError("Driver and mapped-variable time coverage do not align.")
 
-    event_catalog = detect_driver_events(driver, config)
+    if event_catalog is not None:
+        event_catalog = dict(event_catalog)
+    else:
+        event_catalog = resolve_driver_event_catalog(
+            driver,
+            config,
+            manual_event_selection=manual_event_selection,
+        )
     filtered_field, event_catalog = _apply_base_state_filter(mapped_field, event_catalog)
     driver_vals = driver.to_numpy(dtype=float)
     rng = np.random.default_rng(0)
@@ -663,6 +839,7 @@ def compute_sdcmap_event_layers(
         "base_state_threshold": event_catalog["base_state_threshold"],
         "base_state_count": event_catalog["base_state_count"],
         "warnings": event_catalog["warnings"],
+        "selection_mode": event_catalog.get("selection_mode", "auto"),
     }
 
     return {

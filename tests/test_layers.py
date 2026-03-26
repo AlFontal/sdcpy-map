@@ -8,6 +8,7 @@ from sdcpy_map.layers import (
     compute_sdcmap_event_layers,
     compute_sdcmap_layers,
     detect_driver_events,
+    resolve_driver_event_catalog,
 )
 
 
@@ -146,6 +147,49 @@ def test_detect_driver_events_skips_boundary_extrema_without_full_window():
     assert any("Skipped" in warning for warning in catalog["warnings"])
 
 
+def test_resolve_driver_event_catalog_accepts_manual_selection_of_auto_and_arbitrary_events():
+    config = SDCMapConfig(correlation_width=5, n_positive_peaks=2, n_negative_peaks=2, base_state_beta=0.5)
+
+    catalog = resolve_driver_event_catalog(
+        _synthetic_driver(),
+        config,
+        manual_event_selection={
+            "selected_positive_dates": ["2000-03-01", "2001-07-01"],
+            "selected_negative_dates": ["2000-08-01"],
+        },
+    )
+
+    assert catalog["selection_mode"] == "manual"
+    assert [item["date"] for item in catalog["selected_positive"]] == ["2000-03-01", "2001-07-01"]
+    assert [item["source"] for item in catalog["selected_positive"]] == ["auto", "manual"]
+    assert [item["date"] for item in catalog["selected_negative"]] == ["2000-08-01"]
+    assert catalog["selected_negative"][0]["source"] == "auto"
+    assert "2000-12-01" in [item["date"] for item in catalog["ignored_positive"]]
+
+
+def test_resolve_driver_event_catalog_rejects_invalid_manual_events_and_recomputes_base_state():
+    config = SDCMapConfig(correlation_width=5, n_positive_peaks=2, n_negative_peaks=2, base_state_beta=0.5)
+
+    catalog = resolve_driver_event_catalog(
+        _synthetic_driver(),
+        config,
+        manual_event_selection={
+            "selected_positive_dates": ["2001-08-01", "2001-07-01", "2000-05-01"],
+            "selected_negative_dates": ["2000-08-01", "1999-01-01"],
+        },
+    )
+
+    assert [item["date"] for item in catalog["selected_positive"]] == ["2001-08-01"]
+    assert [item["date"] for item in catalog["selected_negative"]] == ["2000-08-01"]
+    assert catalog["base_state_threshold"] == pytest.approx(0.45)
+    mask = np.asarray(catalog["base_state_mask"], dtype=bool)
+    assert bool(mask[23])
+    assert not bool(mask[18])
+    assert any("overlaps another selected event window" in warning for warning in catalog["warnings"])
+    assert any("exactly zero" in warning for warning in catalog["warnings"])
+    assert any("outside the aligned driver time axis" in warning for warning in catalog["warnings"])
+
+
 def test_compute_sdcmap_event_layers_use_selected_event_windows_only(monkeypatch):
     monkeypatch.setattr(
         "sdcpy.compute_sdc",
@@ -186,6 +230,43 @@ def test_compute_sdcmap_event_layers_use_selected_event_windows_only(monkeypatch
     assert result["positive"]["layers"]["lag_mean"][0, 0] == pytest.approx(0.0)
     assert result["negative"]["layers"]["lag_mean"][1, 1] == pytest.approx(0.0)
     assert result["positive"]["lag_maps"]["event_count_by_lag"][0, 0, 0] == pytest.approx(2.0)
+
+
+def test_compute_sdcmap_event_layers_supports_manual_event_selection(monkeypatch):
+    monkeypatch.setattr(
+        "sdcpy.compute_sdc",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("full-series compute_sdc should not be called")),
+    )
+    config = SDCMapConfig(
+        correlation_width=5,
+        n_positive_peaks=2,
+        n_negative_peaks=2,
+        base_state_beta=0.5,
+        n_permutations=49,
+        alpha=0.1,
+        min_lag=0,
+        max_lag=0,
+    )
+
+    result = compute_sdcmap_event_layers(
+        driver=_synthetic_driver(),
+        mapped_field=_synthetic_field(),
+        config=config,
+        manual_event_selection={
+            "selected_positive_dates": ["2001-08-01"],
+            "selected_negative_dates": ["2000-08-01"],
+        },
+    )
+
+    positive_corr = result["positive"]["layers"]["corr_mean"]
+    negative_corr = result["negative"]["layers"]["corr_mean"]
+
+    assert result["event_catalog"]["selection_mode"] == "manual"
+    assert result["positive"]["summary"]["selected_event_count"] == 1
+    assert result["negative"]["summary"]["selected_event_count"] == 1
+    assert np.isfinite(positive_corr[0, 1])
+    assert np.isnan(positive_corr[0, 0])
+    assert np.isfinite(negative_corr[1, 1])
 
 
 def test_compute_sdcmap_layers_keeps_compact_compatibility(monkeypatch):
