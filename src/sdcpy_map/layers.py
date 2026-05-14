@@ -26,6 +26,8 @@ LAYER_KEYS = (
 
 LAG_MAP_KEYS = (
     "corr_by_lag",
+    "driver_rel_time_by_lag",
+    "timing_by_lag",
     "event_count_by_lag",
 )
 
@@ -456,88 +458,7 @@ def _candidate_score(
     )
 
 
-def _aggregate_event_summaries(items: list[dict[str, float]]) -> dict[str, float] | None:
-    if not items:
-        return None
-    keys = items[0].keys()
-    out = {key: float(np.mean([item[key] for item in items])) for key in keys}
-    out["n_selected"] = float(len(items))
-    out["dominant_sign"] = 1.0 if out["corr_mean"] >= 0 else -1.0
-    return out
-
-
-def _summarize_event_window(
-    driver_vals: np.ndarray,
-    local_vals: np.ndarray,
-    *,
-    event_idx: int,
-    config: SDCMapConfig,
-    rng: np.random.Generator,
-) -> dict[str, float] | None:
-    best_summary: dict[str, float] | None = None
-    best_score: tuple[float, float, float, float, float] | None = None
-
-    for center_idx in _iter_event_centers(int(event_idx), int(config.correlation_width), len(driver_vals)):
-        bounds = _event_window_bounds(center_idx, int(config.correlation_width), len(driver_vals))
-        if bounds is None:
-            continue
-        start_1, stop_1 = bounds
-        driver_segment = np.asarray(driver_vals[start_1:stop_1], dtype=float)
-        if np.isnan(driver_segment).any() or np.nanstd(driver_segment) == 0:
-            continue
-
-        lag_values: list[int] = []
-        field_segments: list[np.ndarray] = []
-        for lag in range(int(config.min_lag), int(config.max_lag) + 1):
-            start_2 = start_1 - int(lag)
-            stop_2 = start_2 + int(config.correlation_width)
-            if start_2 < 0 or stop_2 > len(local_vals):
-                continue
-            field_segment = np.asarray(local_vals[start_2:stop_2], dtype=float)
-            if np.isnan(field_segment).any() or np.nanstd(field_segment) == 0:
-                continue
-            lag_values.append(int(lag))
-            field_segments.append(field_segment)
-        if not field_segments:
-            continue
-
-        field_matrix = np.asarray(field_segments, dtype=float)
-        observed = _correlate_reference_against_rows(driver_segment, field_matrix)
-        p_values = _permutation_p_values(
-            driver_segment,
-            field_matrix,
-            observed,
-            n_permutations=int(config.n_permutations),
-            two_tailed=bool(config.two_tailed),
-            rng=rng,
-        )
-        significant = np.isfinite(observed) & np.isfinite(p_values) & (p_values <= float(config.alpha))
-        if not np.any(significant):
-            continue
-
-        driver_rel_center = float(int(center_idx) - int(event_idx))
-        for idx in np.flatnonzero(significant):
-            corr_value = float(observed[idx])
-            lag_value = float(lag_values[idx])
-            score = _candidate_score(corr_value, lag_value, driver_rel_center)
-            if best_score is not None and score >= best_score:
-                continue
-            best_score = score
-            best_summary = {
-                "corr_mean": corr_value,
-                "driver_rel_time_mean": driver_rel_center,
-                "lag_mean": lag_value,
-                "timing_combo": driver_rel_center - lag_value,
-                "strong_span": float(int(config.correlation_width) - 1),
-                "strong_start": float(start_1 - int(event_idx)),
-                "dominant_sign": 1.0 if corr_value >= 0 else -1.0,
-                "n_selected": 1.0,
-            }
-
-    return best_summary
-
-
-def _compute_event_lag_correlations(
+def _compute_event_lag_summary(
     driver_vals: np.ndarray,
     local_vals: np.ndarray,
     *,
@@ -545,9 +466,11 @@ def _compute_event_lag_correlations(
     config: SDCMapConfig,
     lag_values: list[int],
     rng: np.random.Generator,
-) -> np.ndarray:
-    """Compute significant event-local correlations for every requested lag."""
-    out = np.full(len(lag_values), np.nan, dtype=float)
+) -> dict[str, np.ndarray]:
+    """Compute significant event-local summaries for every requested lag."""
+    corr_out = np.full(len(lag_values), np.nan, dtype=float)
+    driver_rel_time_out = np.full(len(lag_values), np.nan, dtype=float)
+    timing_out = np.full(len(lag_values), np.nan, dtype=float)
     best_scores: list[tuple[float, float, float, float, float] | None] = [None] * len(lag_values)
 
     for center_idx in _iter_event_centers(int(event_idx), int(config.correlation_width), len(driver_vals)):
@@ -600,43 +523,14 @@ def _compute_event_lag_correlations(
             if best_scores[lag_position] is not None and score >= best_scores[lag_position]:
                 continue
             best_scores[lag_position] = score
-            out[lag_position] = corr_value
-    return out
-
-
-def _summarize_gridpoint_by_class(
-    driver_vals: np.ndarray,
-    local_vals: np.ndarray,
-    config: SDCMapConfig,
-    event_catalog: dict[str, object],
-    *,
-    rng: np.random.Generator,
-) -> dict[str, dict[str, float] | None]:
-    if np.sum(np.isfinite(local_vals)) < config.correlation_width + 3:
-        return {"positive": None, "negative": None}
-    if np.nanstd(local_vals) == 0:
-        return {"positive": None, "negative": None}
-    if np.isnan(local_vals).any() or np.isnan(driver_vals).any():
-        return {"positive": None, "negative": None}
-
-    out: dict[str, dict[str, float] | None] = {}
-    for sign_key, indices_key in (
-        ("positive", "selected_positive_indices"),
-        ("negative", "selected_negative_indices"),
-    ):
-        event_summaries: list[dict[str, float]] = []
-        for event_idx in event_catalog[indices_key]:
-            summary = _summarize_event_window(
-                driver_vals,
-                local_vals,
-                event_idx=int(event_idx),
-                config=config,
-                rng=rng,
-            )
-            if summary is not None:
-                event_summaries.append(summary)
-        out[sign_key] = _aggregate_event_summaries(event_summaries)
-    return out
+            corr_out[lag_position] = corr_value
+            driver_rel_time_out[lag_position] = driver_rel_center
+            timing_out[lag_position] = driver_rel_center - lag_value
+    return {
+        "corr_by_lag": corr_out,
+        "driver_rel_time_by_lag": driver_rel_time_out,
+        "timing_by_lag": timing_out,
+    }
 
 
 def _build_compact_layers_from_lag_stack(
@@ -644,6 +538,9 @@ def _build_compact_layers_from_lag_stack(
     event_count_by_lag: np.ndarray,
     lag_values: np.ndarray,
     correlation_width: int,
+    *,
+    driver_rel_time_by_lag: np.ndarray | None = None,
+    timing_by_lag: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Collapse lag-resolved class maps into legacy per-cell summary layers."""
     nlag, nlat, nlon = corr_by_lag.shape
@@ -663,13 +560,22 @@ def _build_compact_layers_from_lag_stack(
     best_corr = corr_by_lag[best_indices, row_idx, col_idx]
     best_lag = lag_values[best_indices]
     best_count = event_count_by_lag[best_indices, row_idx, col_idx]
+    if driver_rel_time_by_lag is None:
+        best_driver_rel_time = np.zeros((nlat, nlon), dtype=float)
+    else:
+        best_driver_rel_time = driver_rel_time_by_lag[best_indices, row_idx, col_idx]
+    if timing_by_lag is None:
+        best_timing = best_driver_rel_time - best_lag
+    else:
+        best_timing = timing_by_lag[best_indices, row_idx, col_idx]
+    half_before = (int(correlation_width) - 1) // 2
 
     compact["corr_mean"] = np.where(has_any, best_corr, np.nan)
     compact["lag_mean"] = np.where(has_any, best_lag, np.nan)
-    compact["driver_rel_time_mean"] = np.where(has_any, 0.0, np.nan)
-    compact["timing_combo"] = np.where(has_any, -best_lag, np.nan)
+    compact["driver_rel_time_mean"] = np.where(has_any, best_driver_rel_time, np.nan)
+    compact["timing_combo"] = np.where(has_any, best_timing, np.nan)
     compact["strong_span"] = np.where(has_any, float(int(correlation_width) - 1), np.nan)
-    compact["strong_start"] = np.where(has_any, -float((int(correlation_width) - 1) // 2), np.nan)
+    compact["strong_start"] = np.where(has_any, best_driver_rel_time - float(half_before), np.nan)
     compact["dominant_sign"] = np.where(
         has_any,
         np.where(best_corr >= 0.0, 1.0, -1.0),
@@ -739,10 +645,14 @@ def compute_sdcmap_event_layers(
     class_lag_maps = {
         "positive": {
             "corr_by_lag": np.full((len(lag_values), nlat, nlon), np.nan, dtype=float),
+            "driver_rel_time_by_lag": np.full((len(lag_values), nlat, nlon), np.nan, dtype=float),
+            "timing_by_lag": np.full((len(lag_values), nlat, nlon), np.nan, dtype=float),
             "event_count_by_lag": np.zeros((len(lag_values), nlat, nlon), dtype=float),
         },
         "negative": {
             "corr_by_lag": np.full((len(lag_values), nlat, nlon), np.nan, dtype=float),
+            "driver_rel_time_by_lag": np.full((len(lag_values), nlat, nlon), np.nan, dtype=float),
+            "timing_by_lag": np.full((len(lag_values), nlat, nlon), np.nan, dtype=float),
             "event_count_by_lag": np.zeros((len(lag_values), nlat, nlon), dtype=float),
         },
     }
@@ -764,52 +674,62 @@ def compute_sdcmap_event_layers(
                     progress_callback(completed_cells, total_cells)
                 continue
 
-            summary_by_class = _summarize_gridpoint_by_class(
-                driver_vals,
-                local_vals,
-                config,
-                event_catalog,
-                rng=rng,
-            )
             for sign_key, indices_key in (
                 ("positive", "selected_positive_indices"),
                 ("negative", "selected_negative_indices"),
             ):
-                class_summary = summary_by_class.get(sign_key)
-                if class_summary is not None:
-                    for key, value in class_summary.items():
-                        if key in class_layers[sign_key]:
-                            class_layers[sign_key][key][i, j] = float(value)
-                event_corr_rows: list[np.ndarray] = []
+                event_rows: dict[str, list[np.ndarray]] = {
+                    "corr_by_lag": [],
+                    "driver_rel_time_by_lag": [],
+                    "timing_by_lag": [],
+                }
                 for event_idx in event_catalog[indices_key]:
-                    event_corr_rows.append(
-                        _compute_event_lag_correlations(
-                            driver_vals,
-                            local_vals,
-                            event_idx=int(event_idx),
-                            config=config,
-                            lag_values=lag_values.tolist(),
-                            rng=rng,
-                        )
+                    event_summary = _compute_event_lag_summary(
+                        driver_vals,
+                        local_vals,
+                        event_idx=int(event_idx),
+                        config=config,
+                        lag_values=lag_values.tolist(),
+                        rng=rng,
                     )
-                if not event_corr_rows:
+                    for key, values in event_summary.items():
+                        event_rows[key].append(np.asarray(values, dtype=float))
+                if not event_rows["corr_by_lag"]:
                     continue
-                event_corr_matrix = np.asarray(event_corr_rows, dtype=float)
+                event_corr_matrix = np.asarray(event_rows["corr_by_lag"], dtype=float)
                 finite_mask = np.isfinite(event_corr_matrix)
                 if not np.any(finite_mask):
                     continue
                 counts = np.sum(finite_mask, axis=0).astype(float)
-                sums = np.where(finite_mask, event_corr_matrix, 0.0).sum(axis=0)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    mean_corr = sums / counts
-                mean_corr = np.where(counts > 0, mean_corr, np.nan)
-                class_lag_maps[sign_key]["corr_by_lag"][:, i, j] = mean_corr
+                for key in ("corr_by_lag", "driver_rel_time_by_lag", "timing_by_lag"):
+                    event_matrix = np.asarray(event_rows[key], dtype=float)
+                    sums = np.where(finite_mask, event_matrix, 0.0).sum(axis=0)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        mean_values = sums / counts
+                    class_lag_maps[sign_key][key][:, i, j] = np.where(
+                        counts > 0,
+                        mean_values,
+                        np.nan,
+                    )
                 class_lag_maps[sign_key]["event_count_by_lag"][:, i, j] = counts
             completed_cells += 1
             if progress_callback and (
                 completed_cells == total_cells or completed_cells % callback_every == 0
             ):
                 progress_callback(completed_cells, total_cells)
+
+    for sign_key in ("positive", "negative"):
+        class_layers[sign_key] = _build_compact_layers_from_lag_stack(
+            np.asarray(class_lag_maps[sign_key]["corr_by_lag"], dtype=float),
+            np.asarray(class_lag_maps[sign_key]["event_count_by_lag"], dtype=float),
+            lag_values,
+            int(config.correlation_width),
+            driver_rel_time_by_lag=np.asarray(
+                class_lag_maps[sign_key]["driver_rel_time_by_lag"],
+                dtype=float,
+            ),
+            timing_by_lag=np.asarray(class_lag_maps[sign_key]["timing_by_lag"], dtype=float),
+        )
 
     def _class_summary(sign_key: str) -> dict[str, object]:
         corr = np.asarray(class_layers[sign_key]["corr_mean"], dtype=float)

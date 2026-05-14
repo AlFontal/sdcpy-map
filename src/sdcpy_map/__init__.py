@@ -1,7 +1,7 @@
 """Top-level package for sdcpy-map."""
 
 __author__ = "Alejandro Fontal"
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from sdcpy_map.config import SDCMapConfig
 from sdcpy_map.datasets import (
