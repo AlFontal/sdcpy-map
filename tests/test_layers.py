@@ -110,6 +110,37 @@ def _offset_positive_field() -> xr.DataArray:
     )
 
 
+def _assert_static_layers_come_from_lag_cube(class_result: dict[str, object]) -> None:
+    layers = class_result["layers"]
+    lag_maps = class_result["lag_maps"]
+    lags = np.asarray(lag_maps["lags"], dtype=float)
+    corr_by_lag = np.asarray(lag_maps["corr_by_lag"], dtype=float)
+    driver_rel_by_lag = np.asarray(lag_maps["driver_rel_time_by_lag"], dtype=float)
+    timing_by_lag = np.asarray(lag_maps["timing_by_lag"], dtype=float)
+
+    finite = np.isfinite(corr_by_lag)
+    lag_priority = np.abs(lags)[:, None, None] + (lags[:, None, None] * 1e-6)
+    score = np.where(finite, np.abs(corr_by_lag) * 1_000_000.0 - lag_priority, -np.inf)
+    best_indices = np.argmax(score, axis=0)
+    has_any = np.any(finite, axis=0)
+    row_idx = np.arange(corr_by_lag.shape[1])[:, None]
+    col_idx = np.arange(corr_by_lag.shape[2])[None, :]
+
+    expected_corr = np.where(has_any, corr_by_lag[best_indices, row_idx, col_idx], np.nan)
+    expected_lag = np.where(has_any, lags[best_indices], np.nan)
+    expected_driver_rel = np.where(
+        has_any,
+        driver_rel_by_lag[best_indices, row_idx, col_idx],
+        np.nan,
+    )
+    expected_timing = np.where(has_any, timing_by_lag[best_indices, row_idx, col_idx], np.nan)
+
+    assert np.allclose(layers["corr_mean"], expected_corr, equal_nan=True)
+    assert np.allclose(layers["lag_mean"], expected_lag, equal_nan=True)
+    assert np.allclose(layers["driver_rel_time_mean"], expected_driver_rel, equal_nan=True)
+    assert np.allclose(layers["timing_combo"], expected_timing, equal_nan=True)
+
+
 def test_detect_driver_events_separates_positive_and_negative_peaks():
     config = SDCMapConfig(correlation_width=5, n_positive_peaks=2, n_negative_peaks=2, base_state_beta=0.5)
     catalog = detect_driver_events(_synthetic_driver(), config)
@@ -220,6 +251,8 @@ def test_compute_sdcmap_event_layers_use_selected_event_windows_only(monkeypatch
     assert "event_catalog" in result
     assert result["positive"]["lag_maps"]["lags"] == [0]
     assert result["positive"]["lag_maps"]["corr_by_lag"].shape == (1, 2, 2)
+    assert result["positive"]["lag_maps"]["driver_rel_time_by_lag"].shape == (1, 2, 2)
+    assert result["positive"]["lag_maps"]["timing_by_lag"].shape == (1, 2, 2)
     assert result["positive"]["summary"]["selected_event_count"] == 2
     assert result["negative"]["summary"]["selected_event_count"] == 2
     assert np.isfinite(positive_corr[0, 0])
@@ -230,6 +263,8 @@ def test_compute_sdcmap_event_layers_use_selected_event_windows_only(monkeypatch
     assert result["positive"]["layers"]["lag_mean"][0, 0] == pytest.approx(0.0)
     assert result["negative"]["layers"]["lag_mean"][1, 1] == pytest.approx(0.0)
     assert result["positive"]["lag_maps"]["event_count_by_lag"][0, 0, 0] == pytest.approx(2.0)
+    _assert_static_layers_come_from_lag_cube(result["positive"])
+    _assert_static_layers_come_from_lag_cube(result["negative"])
 
 
 def test_compute_sdcmap_event_layers_supports_manual_event_selection(monkeypatch):
@@ -267,6 +302,8 @@ def test_compute_sdcmap_event_layers_supports_manual_event_selection(monkeypatch
     assert np.isfinite(positive_corr[0, 1])
     assert np.isnan(positive_corr[0, 0])
     assert np.isfinite(negative_corr[1, 1])
+    _assert_static_layers_come_from_lag_cube(result["positive"])
+    _assert_static_layers_come_from_lag_cube(result["negative"])
 
 
 def test_compute_sdcmap_layers_keeps_compact_compatibility(monkeypatch):
@@ -309,6 +346,7 @@ def test_compute_sdcmap_event_layers_tracks_peak_relative_position(monkeypatch):
     assert positive_layers["driver_rel_time_mean"][0, 0] == pytest.approx(1.0)
     assert positive_layers["lag_mean"][0, 0] == pytest.approx(0.0)
     assert positive_layers["timing_combo"][0, 0] == pytest.approx(1.0)
+    _assert_static_layers_come_from_lag_cube(result["positive"])
 
 
 def test_compute_sdcmap_event_layers_reports_cell_progress(monkeypatch):

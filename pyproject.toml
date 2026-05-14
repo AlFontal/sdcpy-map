@@ -1,6 +1,6 @@
 [project]
 name = "sdcpy-map"
-version = "0.1.0"
+version = "0.1.1"
 description = "Spatial Scale-Dependent Correlation map utilities built on top of sdcpy"
 readme = "README.md"
 license = {text = "MIT"}
